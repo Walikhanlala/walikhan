@@ -1,0 +1,2 @@
+# walikhan
+Terminator Owner
