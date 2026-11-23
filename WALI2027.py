@@ -246,13 +246,11 @@ async def get_real_feedback_id(post_url, cookie="", user_agent=None, numeric_pos
     feedback_ids page mein door hote hain, isliye woh match nahi karenge.
     """
     if not post_url or not post_url.startswith("http"):
-        print(f"\033[38;5;196m[DEBUG][PFBID] FAIL: post_url invalid => '{post_url}'{reset}")
         return None
     # Cache check — same post ke liye dobara fetch mat karo
     cache_key = f"{post_url}|{numeric_post_id or ''}"
     with _PFBID_LOCK:
         if cache_key in _PFBID_CACHE:
-            print(f"\033[38;5;87m[DEBUG][PFBID] Cache HIT => {_PFBID_CACHE[cache_key][:40]}...{reset}")
             return _PFBID_CACHE[cache_key]
     if user_agent is None:
         user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -260,7 +258,7 @@ async def get_real_feedback_id(post_url, cookie="", user_agent=None, numeric_pos
         "User-Agent": user_agent,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate",  # br/brotli hataya — Termux mein support nahi
+        "Accept-Encoding": "gzip, deflate",
         "cookie": cookie,
         "referer": "https://www.facebook.com/",
         "sec-fetch-dest": "document",
@@ -268,43 +266,56 @@ async def get_real_feedback_id(post_url, cookie="", user_agent=None, numeric_pos
         "sec-fetch-site": "same-origin",
     }
     try:
-        print(f"\033[38;5;87m[DEBUG][PFBID] Fetching URL: {post_url}{reset}")
         connector = aiohttp.TCPConnector(limit=10, limit_per_host=5, ttl_dns_cache=300)
         timeout = aiohttp.ClientTimeout(connect=15, sock_read=20, total=40)
         async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
             async with session.get(post_url, headers=headers, allow_redirects=True, max_redirects=5) as resp:
-                http_status = resp.status
                 text = await resp.text(encoding="utf-8", errors="replace")
-        print(f"\033[38;5;87m[DEBUG][PFBID] HTTP Status={http_status} | Page size={len(text)} chars{reset}")
 
         result = None
 
-        all_p1 = [(m.start(), m.group(1)) for m in re.finditer(r'"feedback_id"\s*:\s*"(feedback:pfbid[^"]+)"', text)]
-        print(f"\033[38;5;87m[DEBUG][PFBID] Pattern1 matches={len(all_p1)}{reset}")
-
-        if numeric_post_id and all_p1:
+        # Pattern3 pehle (base64 encoded — Facebook ab yahi deta hai)
+        all_p3 = [(m.start(), m.group(1)) for m in re.finditer(r'"feedback_id"\s*:\s*"(Zm[A-Za-z0-9+/=]{20,})"', text)]
+        decoded_candidates = []
+        for pos, candidate in all_p3:
+            try:
+                decoded = base64.b64decode(candidate).decode("utf-8")
+                if decoded.startswith("feedback:pfbid"):
+                    decoded_candidates.append((pos, candidate, decoded))
+            except Exception:
+                pass
+        if numeric_post_id and decoded_candidates:
             pid_positions = [m.start() for m in re.finditer(re.escape(str(numeric_post_id)), text)]
-            print(f"\033[38;5;87m[DEBUG][PFBID] numeric_post_id='{numeric_post_id}' found at {len(pid_positions)} position(s) in page{reset}")
             if pid_positions:
-                best_fid = None
-                best_dist = None
-                for pos, fid in all_p1:
+                best = None; best_dist = None
+                for pos, candidate, decoded in decoded_candidates:
                     nearest = min(abs(pos - pp) for pp in pid_positions)
                     if best_dist is None or nearest < best_dist:
-                        best_dist = nearest
-                        best_fid = fid
-                if best_fid:
-                    result = base64.b64encode(best_fid.encode()).decode("utf-8")
-                    print(f"\033[38;5;87m[DEBUG][PFBID] Proximity match => {best_fid} (dist={best_dist}){reset}")
+                        best_dist = nearest; best = (candidate, decoded)
+                if best:
+                    result = best[0]
+        if not result and decoded_candidates:
+            result = decoded_candidates[0][1]
 
-        if not result and all_p1:
-            raw_fid = all_p1[0][1]
-            result = base64.b64encode(raw_fid.encode()).decode("utf-8")
-            print(f"\033[38;5;87m[DEBUG][PFBID] Fallback P1 first-match => {raw_fid}{reset}")
+        # Pattern1 (direct feedback:pfbid)
+        if not result:
+            all_p1 = [(m.start(), m.group(1)) for m in re.finditer(r'"feedback_id"\s*:\s*"(feedback:pfbid[^"]+)"', text)]
+            if numeric_post_id and all_p1:
+                pid_positions = [m.start() for m in re.finditer(re.escape(str(numeric_post_id)), text)]
+                if pid_positions:
+                    best_fid = None; best_dist = None
+                    for pos, fid in all_p1:
+                        nearest = min(abs(pos - pp) for pp in pid_positions)
+                        if best_dist is None or nearest < best_dist:
+                            best_dist = nearest; best_fid = fid
+                    if best_fid:
+                        result = base64.b64encode(best_fid.encode()).decode("utf-8")
+            if not result and all_p1:
+                result = base64.b64encode(all_p1[0][1].encode()).decode("utf-8")
 
+        # Pattern2 (escaped JSON)
         if not result:
             all_p2 = [(m.start(), m.group(1)) for m in re.finditer(r'feedback_id\\?":\s*\\?"(feedback:pfbid[^"\\]+)', text)]
-            print(f"\033[38;5;87m[DEBUG][PFBID] Pattern2 matches={len(all_p2)}{reset}")
             if numeric_post_id and all_p2:
                 pid_positions = [m.start() for m in re.finditer(re.escape(str(numeric_post_id)), text)]
                 if pid_positions:
@@ -315,50 +326,17 @@ async def get_real_feedback_id(post_url, cookie="", user_agent=None, numeric_pos
                             best_dist = nearest; best_fid = fid
                     if best_fid:
                         result = base64.b64encode(best_fid.encode()).decode("utf-8")
-                        print(f"\033[38;5;87m[DEBUG][PFBID] P2 proximity => {best_fid}{reset}")
             if not result and all_p2:
-                raw_fid = all_p2[0][1]
-                result = base64.b64encode(raw_fid.encode()).decode("utf-8")
-                print(f"\033[38;5;87m[DEBUG][PFBID] Fallback P2 first-match => {raw_fid}{reset}")
-
-        if not result:
-            all_p3 = [(m.start(), m.group(1)) for m in re.finditer(r'"feedback_id"\s*:\s*"(Zm[A-Za-z0-9+/=]{20,})"', text)]
-            print(f"\033[38;5;87m[DEBUG][PFBID] Pattern3 matches={len(all_p3)}{reset}")
-            decoded_candidates = []
-            for pos, candidate in all_p3:
-                try:
-                    decoded = base64.b64decode(candidate).decode("utf-8")
-                    if decoded.startswith("feedback:pfbid"):
-                        decoded_candidates.append((pos, candidate, decoded))
-                except Exception:
-                    pass
-            if numeric_post_id and decoded_candidates:
-                pid_positions = [m.start() for m in re.finditer(re.escape(str(numeric_post_id)), text)]
-                if pid_positions:
-                    best = None; best_dist = None
-                    for pos, candidate, decoded in decoded_candidates:
-                        nearest = min(abs(pos - pp) for pp in pid_positions)
-                        if best_dist is None or nearest < best_dist:
-                            best_dist = nearest; best = (candidate, decoded)
-                    if best:
-                        result = best[0]
-                        print(f"\033[38;5;87m[DEBUG][PFBID] P3 proximity => {best[1]}{reset}")
-            if not result and decoded_candidates:
-                best = decoded_candidates[0]
-                result = best[1]
-                print(f"\033[38;5;87m[DEBUG][PFBID] Fallback P3 first-match => {best[2]}{reset}")
+                result = base64.b64encode(all_p2[0][1].encode()).decode("utf-8")
 
         if result:
             with _PFBID_LOCK:
                 _PFBID_CACHE[cache_key] = result
-            print(f"\033[38;5;87m[DEBUG][PFBID] FINAL result => {result[:60]}...{reset}")
             return result
 
-        print(f"\033[38;5;196m[DEBUG][PFBID] FAIL: Koi bhi pattern match nahi hua! URL={post_url}{reset}")
         return None
     except Exception as e:
-        print(f"\033[38;5;196m[DEBUG][PFBID] EXCEPTION: {type(e).__name__}: {e}{reset}")
-        import traceback; traceback.print_exc()
+        logger.exception("get_real_feedback_id error: %s", e)
         return None
 
 
@@ -2786,8 +2764,7 @@ class FB:
             colored_id2 = "".join(colors[(i + reaction_count) % len(colors)] + ch + reset for i, ch in enumerate(str(actor_id)))
             print(f"\033[38;5;201m[\033[38;5;129m++\033[38;5;201m] \033[1m\033[38;5;93mREACTION \033[38;5;57mSUCCESS\033[0m \033[38;5;201m==> \033[38;5;255mActor: {colored_id2} \033[38;5;201m[\033[38;5;129m{reaction_count}\033[38;5;201m]{reset}")
         except Exception as e:
-            print(f"\033[38;5;196m[DEBUG][REACTION] Actor={actor_id} | ERR={type(e).__name__}: {e}{reset}")
-            import traceback; traceback.print_exc()
+            logger.exception("reaction error actor=%s: %s", actor_id, e)
 
 
     def reaction_smooth(self, reaction_id, idpro5):
@@ -2859,8 +2836,7 @@ class FB:
                     ok += 1
                 print(f"\033[38;5;201m[\033[38;5;129m++\033[38;5;201m] \033[1m\033[38;5;93mREACTION \033[38;5;57mSUCCESS\033[0m \033[38;5;201m==> \033[38;5;255mActor: {colored_id} \033[38;5;201m[\033[38;5;129m{reaction_count}\033[38;5;201m]{reset}")
         except Exception as e:
-            print(f"\033[38;5;196m[DEBUG][REACTION-SMOOTH] Actor={idpro5} | ERR={type(e).__name__}: {e}{reset}")
-            import traceback; traceback.print_exc()
+            logger.exception("reaction_smooth error actor=%s: %s", idpro5, e)
 
     # ── PAGE CREATE — BILKUL TOUCH NAHI ── (sync, requests library)
     def page_create(self):
@@ -3247,13 +3223,10 @@ class FB:
                 return
             if errors:
                 print(f"\033[38;5;196m[\033[38;5;228m--\033[38;5;196m] \033[1m\033[38;5;196mCOMMENT \033[38;5;208mERROR: {err_display}\033[0m \033[38;5;255m==> Actor: {colored_id}{reset}")
-                print(f"\033[38;5;196m[DEBUG][CMT] feedback_id used={self.idbv} | full_resp={resp_text[:300]}{reset}")
                 return
             print(f"\033[38;5;196m[\033[38;5;228m--\033[38;5;196m] \033[1m\033[38;5;196mCOMMENT \033[38;5;208mNO RESPONSE\033[0m \033[38;5;255m==> Actor: {colored_id}{reset}")
-            print(f"\033[38;5;196m[DEBUG][CMT] feedback_id used={self.idbv} | full_resp={resp_text[:300]}{reset}")
         except Exception as e:
-            print(f"\033[38;5;196m[DEBUG][CMT] Actor={actor_id} | ERR={type(e).__name__}: {e}{reset}")
-            import traceback; traceback.print_exc()
+            logger.exception("cmt error actor=%s: %s", actor_id, e)
 
     async def maincmt(self):
         """Fast Mode — old Alisha async cmt() logic"""
