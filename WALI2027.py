@@ -260,7 +260,7 @@ async def get_real_feedback_id(post_url, cookie="", user_agent=None, numeric_pos
         "User-Agent": user_agent,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
+        "Accept-Encoding": "gzip, deflate",  # br/brotli hataya — Termux mein support nahi
         "cookie": cookie,
         "referer": "https://www.facebook.com/",
         "sec-fetch-dest": "document",
@@ -269,11 +269,12 @@ async def get_real_feedback_id(post_url, cookie="", user_agent=None, numeric_pos
     }
     try:
         print(f"\033[38;5;87m[DEBUG][PFBID] Fetching URL: {post_url}{reset}")
-        connector = _make_connector()
-        async with aiohttp.ClientSession(connector=connector, timeout=_make_timeout()) as session:
-            async with session.get(post_url, headers=headers, allow_redirects=True) as resp:
+        connector = aiohttp.TCPConnector(limit=10, limit_per_host=5, ttl_dns_cache=300)
+        timeout = aiohttp.ClientTimeout(connect=15, sock_read=20, total=40)
+        async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+            async with session.get(post_url, headers=headers, allow_redirects=True, max_redirects=5) as resp:
                 http_status = resp.status
-                text = await resp.text()
+                text = await resp.text(encoding="utf-8", errors="replace")
         print(f"\033[38;5;87m[DEBUG][PFBID] HTTP Status={http_status} | Page size={len(text)} chars{reset}")
 
         result = None
@@ -2738,7 +2739,10 @@ class FB:
                     resp_text = await resp.text()
             except Exception as e:
                 colored_id = "".join(colors[(i + reaction_count) % len(colors)] + ch + reset for i, ch in enumerate(str(actor_id)))
-                print(f"\033[38;5;196m[\033[38;5;201m--\033[38;5;196m] \033[1m\033[38;5;196mREACTION \033[38;5;201mNETWORK ERROR\033[0m \033[38;5;255m==> Actor: {colored_id} \033[38;5;201m| ERR: {type(e).__name__}: {e}{reset}")
+                if "TooManyRedirects" in type(e).__name__:
+                    print(f"\033[38;5;196m[\033[38;5;201m--\033[38;5;196m] \033[1m\033[38;5;196mREACTION \033[38;5;201mWRONG FEEDBACK_ID (pfbid fetch fail tha)\033[0m \033[38;5;255m==> Actor: {colored_id}{reset}")
+                else:
+                    print(f"\033[38;5;196m[\033[38;5;201m--\033[38;5;196m] \033[1m\033[38;5;196mREACTION \033[38;5;201mNETWORK ERROR\033[0m \033[38;5;255m==> Actor: {colored_id} \033[38;5;201m| ERR: {type(e).__name__}: {e}{reset}")
                 return
 
             colored_id = "".join(colors[(i + reaction_count) % len(colors)] + ch + reset for i, ch in enumerate(str(actor_id)))
@@ -3196,7 +3200,10 @@ class FB:
                     resp_text = await resp.text()
             except Exception as e:
                 colored_id = "".join(colors[(i + comment_count) % len(colors)] + ch + reset for i, ch in enumerate(str(actor_id)))
-                print(f"\033[38;5;196m[\033[38;5;51m--\033[38;5;196m] \033[1m\033[38;5;196mCOMMENT \033[38;5;51mNETWORK ERROR\033[0m \033[38;5;255m==> Actor: {colored_id}{reset}")
+                if "TooManyRedirects" in type(e).__name__:
+                    print(f"\033[38;5;196m[\033[38;5;51m--\033[38;5;196m] \033[1m\033[38;5;196mCOMMENT \033[38;5;51mWRONG FEEDBACK_ID (pfbid fetch fail tha)\033[0m \033[38;5;255m==> Actor: {colored_id}{reset}")
+                else:
+                    print(f"\033[38;5;196m[\033[38;5;51m--\033[38;5;196m] \033[1m\033[38;5;196mCOMMENT \033[38;5;51mNETWORK ERROR\033[0m \033[38;5;255m==> Actor: {colored_id}{reset}")
                 return
 
             colored_id = "".join(colors[(i + comment_count) % len(colors)] + ch + reset for i, ch in enumerate(str(actor_id)))
